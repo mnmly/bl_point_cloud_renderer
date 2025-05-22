@@ -1,8 +1,8 @@
 bl_info = {
-    "name": "Point Cloud GL Renderer",
-    "author": "Claude",
+    "name": "Point Cloud GPU Renderer",
+    "author": "Hiroaki Yamane",
     "version": (1, 1),
-    "blender": (3, 0, 0),
+    "blender": (4, 4, 0),
     "location": "View3D > Sidebar > Point Cloud",
     "description": "Renders point clouds using OpenGL points and exports visualizations and animations",
     "category": "3D View",
@@ -130,24 +130,6 @@ class PointCloudRenderSettings(PropertyGroup):
         max=1.0,
         subtype='COLOR',
     )
-    frame_start: IntProperty(
-        name="Start Frame",
-        description="First frame of the animation to render",
-        default=1,
-        min=0
-    )
-    frame_end: IntProperty(
-        name="End Frame",
-        description="Last frame of the animation to render",
-        default=250,
-        min=0
-    )
-    frame_step: IntProperty(
-        name="Frame Step",
-        description="Number of frames to skip between renders",
-        default=1,
-        min=1
-    )
     frame_padding: IntProperty(
         name="Frame Padding",
         description="Number of digits to use for frame number in filename",
@@ -156,6 +138,27 @@ class PointCloudRenderSettings(PropertyGroup):
         max=8
     )
 
+class POINTCLOUD_OT_reload_shader(Operator):
+    bl_idname = "pointcloud.reload_shader"
+    bl_label = "Reload Shader"
+    bl_description = "Reload shader without regenerating points"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    def execute(self, context):
+        global object_data_cache, handler_shader
+        
+        if object_data_cache is None:
+            self.report({'ERROR'}, "No point cloud data available. Generate points first.")
+            return {'CANCELLED'}
+        
+        # Force shader recompilation
+        handler_shader = None
+        
+        # Reuse existing point data with new shader
+        create_point_cloud_handler(context, object_data_cache, context.scene.point_cloud_props.point_size)
+        
+        self.report({'INFO'}, "Shader reloaded successfully")
+        return {'FINISHED'}
 
 class POINTCLOUD_OT_generate_points(Operator):
     bl_idname = "pointcloud.generate_points"
@@ -173,6 +176,7 @@ class POINTCLOUD_OT_generate_points(Operator):
         depsgraph = context.evaluated_depsgraph_get()
         visible_objects = [obj for obj in bpy.context.scene.objects if obj.visible_get()]
         object_data_list = []
+        uniforms = bpy.context.scene.point_cloud_uniforms
 
         for obj in visible_objects:
             if obj.type == 'MESH':
@@ -199,7 +203,8 @@ class POINTCLOUD_OT_generate_points(Operator):
                 object_data_list.append({
                     'points': _points,
                     'colors': _colors,
-                    'matrix_world': world_matrix
+                    'matrix_world': world_matrix,
+                    'uniforms': uniforms
                 })
             else:
                 continue
@@ -227,8 +232,8 @@ class POINTCLOUD_OT_render_image(Operator):
     
     def execute(self, context):
         # Make sure we have a point cloud
-        global handler_batch
-        if handler_batch is None:
+        global handler_batches
+        if handler_batches is None or len(handler_batches) == 0:
             self.report({'ERROR'}, "No point cloud to render")
             return {'CANCELLED'}
         
@@ -299,14 +304,27 @@ class POINTCLOUD_OT_render_image(Operator):
             gpu.state.depth_mask_set(True)
             
             # Draw the points
-            global handler_shader, use_smooth_shader, shader_type
+            global use_smooth_shader, shader_type
 
-            if shader_type == 'CUSTOM':
-                # For custom shader, point size is handled in the shader
-                handler_shader.uniform_float("frameCount", context.scene.frame_current)
-            elif not use_smooth_shader:
-                handler_shader.uniform_float("color", first_color)
-            handler_batch.draw(handler_shader)
+            for batch_data in handler_batches:
+
+                if shader_type == 'CUSTOM':
+                    # For custom shader, point size is handled in the shader
+                    handler_shader.uniform_float("ModelViewProjectionMatrix", 
+                                                    context.region_data.perspective_matrix @ batch_data['matrix_world'])
+                    handler_shader.uniform_float("frameCount", context.scene.frame_current)
+                    for item in uniforms:
+                        if item.enabled:
+                            if item.property_type == "VEC3":
+                                handler_shader.uniform_float(item.name, item.evaluate_value())
+                            elif item.property_type == "MAT4":
+                                handler_shader.uniform_float(item.name, item.evaluate_value())
+                elif not use_smooth_shader:
+                    handler_shader.uniform_float("ModelViewProjectionMatrix", 
+                                                    context.region_data.perspective_matrix @ batch_data['matrix_world'])
+                    handler_shader.uniform_float("color", first_color)
+
+                batch_data['batch'].draw(handler_shader)
 
             # Reset state
             gpu.state.point_size_set(1.0)
@@ -410,8 +428,8 @@ class POINTCLOUD_OT_save_animation(Operator):
     
     def execute(self, context):
         # Make sure we have a point cloud
-        global handler_batch
-        if handler_batch is None:
+        global handler_batches
+        if handler_batches is None or len(handler_batches) == 0:
             self.report({'ERROR'}, "No point cloud to render")
             return {'CANCELLED'}
         
@@ -433,10 +451,10 @@ class POINTCLOUD_OT_save_animation(Operator):
         
         # Render each frame
         frames_rendered = 0
-        self.report({'INFO'}, f"Starting animation render from frame {render_props.frame_start} to {render_props.frame_end}")
+        self.report({'INFO'}, f"Starting animation render from frame {context.scene.frame_start} to {context.scene.frame_end}")
         
         try:
-            for frame in range(render_props.frame_start, render_props.frame_end + 1, render_props.frame_step):
+            for frame in range(context.scene.frame_start, context.scene.frame_end + 1, context.scene.frame_step):
                 # Set current frame
                 context.scene.frame_set(frame)
                 
@@ -471,7 +489,7 @@ class POINTCLOUD_OT_save_animation(Operator):
                 frames_rendered += 1
                 
                 # Update progress in the console
-                print(f"Rendered frame {frame} ({frames_rendered}/{((render_props.frame_end - render_props.frame_start) // render_props.frame_step) + 1})")
+                print(f"Rendered frame {frame} ({frames_rendered}/{((context.scene.frame_end - context.scene.frame_start) // context.scene.frame_step) + 1})")
         
         except Exception as e:
             self.report({'ERROR'}, f"Error rendering animation: {str(e)}")
@@ -508,13 +526,57 @@ class POINTCLOUD_PT_panel(Panel):
         row = box.row()
         row.prop(props, "shader_type", expand=True)
 
-        if props.shader_type == 'CUSTOM':
+        if props.shader_type == 'CUSTOM' or props.shader_type == 'BUILTIN':
             box.label(text="Vertex Shader:")
             row = box.row()
             row.prop_search(props, "vertex_shader_source", bpy.data, "texts", text="")
             box.label(text="Fragment Shader:")
             row = box.row()
             row.prop_search(props, "fragment_shader_source", bpy.data, "texts", text="")
+            box.label(text="Reload Shader:")
+            row = box.row()
+
+            index = 0
+            box = layout.box()
+            box.label(text="Custom Uniforms")
+            col = box.column()
+            for item in bpy.context.scene.point_cloud_uniforms:
+                col_box = col.column()
+                box = col_box.box()
+                #box.enabled = not envars.isServerRunning
+                colsub = box.column()
+                row = colsub.row(align=True)
+
+                row.prop(item, "ui_expanded", text = "", 
+                            icon='DISCLOSURE_TRI_DOWN' if item.ui_expanded else 'DISCLOSURE_TRI_RIGHT', 
+                            emboss = False)
+
+                sub1 = row.row()
+                sub1.prop(item, "enabled", text = "", 
+                            icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT', 
+                            emboss = False)
+                sub2 = row.row()
+                sub2.active = item.enabled
+                sub2.label(text=f"{item.name}:{item.property_type} = {item.target_object}.{item.target_property}")
+                subsub = sub2.row(align=True)
+                subsub.operator("pointcloud.delete_uniform", icon='PANEL_CLOSE', text = "").index = index
+
+                if item.ui_expanded:
+                    dataColumn = colsub.column(align=True)
+                    dataSplit = dataColumn.split(factor = 0.2)
+                    colLabel = dataSplit.column(align = True)
+                    colData = dataSplit.column(align = True)
+                    colLabel.label(text='Name')
+                    colData.prop(item, "name", text="")
+                    colLabel.label(text='Object')
+                    colData.prop_search(item, "target_object", bpy.data, "objects", text="")
+                    colLabel.label(text='Property')
+                    colData.prop(item, "target_property", text="")
+
+                index = index + 1
+            layout.operator("pointcloud.create_uniform", icon='PRESET_NEW', text='Create new uniform').copy = -1
+        row = layout.row()
+        row.operator("pointcloud.reload_shader", icon='FILE_REFRESH')
         
         if not props.use_random_colors and not props.use_vertex_colors:
             layout.prop(props, "point_color")
@@ -533,7 +595,7 @@ class POINTCLOUD_PT_panel(Panel):
 
 
 class POINTCLOUD_PT_render_panel(Panel):
-    bl_label = "Point Cloud Render"
+    bl_label = "Point Cloud Render Settings"
     bl_idname = "POINTCLOUD_PT_render_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -566,9 +628,9 @@ class POINTCLOUD_PT_render_panel(Panel):
         box.label(text="Animation")
         col = box.column(align=True)
         row = col.row(align=True)
-        row.prop(render_props, "frame_start")
-        row.prop(render_props, "frame_end")
-        col.prop(render_props, "frame_step")
+        row.prop(context.scene, "frame_start")
+        row.prop(context.scene, "frame_end")
+        col.prop(context.scene, "frame_step")
         col.prop(render_props, "frame_padding")
         box.operator("pointcloud.save_animation", icon='RENDER_ANIMATION')
 
@@ -579,6 +641,7 @@ handler_batch = None
 handler_shader = None
 use_smooth_shader = False
 shader_type = 'UNIFORM_COLOR'
+object_data_cache = None
 
 # Handler for file load events
 def on_file_load(dummy):
@@ -602,34 +665,19 @@ def on_frame_change(scene):
     except Exception as e:
         print(f"Could not generate point cloud on frame change: {e}")
 
-def create_point_cloud_handler(context, object_data_list, point_size):
-    global draw_handler, handler_batch, handler_shader, use_smooth_shader, shader_type
-    
-    # Remove existing handler if it exists
-    remove_handler(context)
-
-    # Check if we have any objects to render
-    if not object_data_list:
-        return
-    
-    # Determine which shader to use
-    first_object = object_data_list[0]
-    first_color = first_object['colors'][0] if len(first_object['colors']) > 0 else (1.0, 1.0, 1.0, 1.0)
-    props = context.scene.point_cloud_props
-    use_smooth_shader = props.use_vertex_colors or props.use_random_colors
-    shader_type = props.shader_type
-
-    # Store batches and matrices for each object
-    handler_batches = []
-
+def compile_shader(props):
+    """Compile and return the appropriate shader based on settings"""
     if props.shader_type == 'CUSTOM':
         vert_out = gpu.types.GPUStageInterfaceInfo("my_interface")
         vert_out.smooth('VEC4', "vertColor")
 
         shader_info = gpu.types.GPUShaderCreateInfo()
         shader_info.push_constant('MAT4', "ModelViewProjectionMatrix")
-        shader_info.push_constant('MAT4', "ModelMatrix")  # Add model matrix uniform
         shader_info.push_constant('FLOAT', "frameCount")
+        for item in bpy.context.scene.point_cloud_uniforms:
+            if item.enabled:
+                if item.property_type != "Invalid":
+                    shader_info.push_constant(item.property_type, item.name)
         shader_info.vertex_in(0, 'VEC3', "pos")
         shader_info.vertex_in(1, 'VEC4', "color")
         shader_info.vertex_out(vert_out)
@@ -661,20 +709,20 @@ def create_point_cloud_handler(context, object_data_list, point_size):
         shader = gpu.shader.create_from_info(shader_info)
         del vert_out
         del shader_info
-
-        for obj_data in object_data_list:
-            batch = batch_for_shader(shader, 'POINTS', {
-                "pos": obj_data['points'],
-                "color": obj_data['colors']
-            })
-            handler_batches.append({
-                'batch': batch,
-                'matrix_world': obj_data['matrix_world']
-            })
+        return shader
         
     elif use_smooth_shader:
-        shader = gpu.shader.from_builtin('SMOOTH_COLOR')
-        # Create a batch for each object
+        return gpu.shader.from_builtin('SMOOTH_COLOR')
+    else:
+        return gpu.shader.from_builtin('UNIFORM_COLOR')
+
+def create_batches(object_data_list, shader, first_color):
+    """Create batches for each object using the provided shader"""
+    global handler_batches
+    
+    handler_batches = []
+    
+    if shader_type == 'CUSTOM' or use_smooth_shader:
         for obj_data in object_data_list:
             batch = batch_for_shader(shader, 'POINTS', {
                 "pos": obj_data['points'],
@@ -682,10 +730,10 @@ def create_point_cloud_handler(context, object_data_list, point_size):
             })
             handler_batches.append({
                 'batch': batch,
-                'matrix_world': obj_data['matrix_world']
+                'matrix_world': obj_data['matrix_world'],
+                'uniforms': obj_data['uniforms']
             })
     else:
-        shader = gpu.shader.from_builtin('UNIFORM_COLOR')
         for obj_data in object_data_list:
             batch = batch_for_shader(shader, 'POINTS', {
                 "pos": obj_data['points']
@@ -695,10 +743,39 @@ def create_point_cloud_handler(context, object_data_list, point_size):
                 'matrix_world': obj_data['matrix_world'],
                 'color': obj_data['colors'][0] if obj_data['colors'] else first_color
             })
+    return handler_batches
+
+
+def create_point_cloud_handler(context, object_data_list, point_size, recompile_shader=True):
+    global draw_handler, handler_batch, handler_shader, use_smooth_shader, shader_type, object_data_cache, handler_batches
     
-    handler_shader = shader
+    # Remove existing handler if it exists
+    remove_handler(context)
+
+    # Check if we have any objects to render
+    if not object_data_list:
+        return
+
+    # Cache the object data for later reuse
+    object_data_cache = object_data_list
     
-    def draw():
+    # Determine which shader to use
+    first_object = object_data_list[0]
+    first_color = first_object['colors'][0] if len(first_object['colors']) > 0 else (1.0, 1.0, 1.0, 1.0)
+    props = context.scene.point_cloud_props
+    use_smooth_shader = props.use_vertex_colors or props.use_random_colors
+    shader_type = props.shader_type
+
+    # Store batches and matrices for each object
+    handler_batches = []
+ 
+    # Compile shader if needed
+    if recompile_shader or handler_shader is None:
+        handler_shader = compile_shader(props)
+    
+    handler_batches = create_batches(object_data_list, handler_shader, first_color)
+    
+    def draw(context, point_size, first_color):
         # Set point size
         gpu.state.point_size_set(point_size)
         
@@ -713,6 +790,10 @@ def create_point_cloud_handler(context, object_data_list, point_size):
                 handler_shader.uniform_float("ModelViewProjectionMatrix", 
                                                 context.region_data.perspective_matrix @ batch_data['matrix_world'])
                 handler_shader.uniform_float("frameCount", context.scene.frame_current)
+                for item in batch_data['uniforms']:
+                    val = item.evaluate_value()
+                    if item.property_type in ["VEC3", "VEC4", "FLOAT"]:
+                        handler_shader.uniform_float(item.name, val)
             elif not use_smooth_shader:
                 handler_shader.uniform_float("ModelViewProjectionMatrix", 
                                                 context.region_data.perspective_matrix @ batch_data['matrix_world'])
@@ -724,7 +805,7 @@ def create_point_cloud_handler(context, object_data_list, point_size):
         gpu.state.point_size_set(1.0)
     
     # Add the draw handler
-    draw_handler = bpy.types.SpaceView3D.draw_handler_add(draw, (), 'WINDOW', 'POST_VIEW')
+    draw_handler = bpy.types.SpaceView3D.draw_handler_add(draw, (context, point_size, first_color), 'WINDOW', 'POST_VIEW')
 
 
 def remove_handler(context):
@@ -741,15 +822,70 @@ def remove_handler(context):
             if area.type == 'VIEW_3D':
                 area.tag_redraw()
 
+from .point_cloud_uniforms import PointCloudUniforms
+
+
+class POINTCLOUD_OT_create_uniform(bpy.types.Operator):
+    """Create new uniform handler"""
+    bl_idname = "pointcloud.create_uniform"
+    bl_label = "Create"
+
+    copy: bpy.props.IntProperty(default=0)
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None
+
+    def execute(self, context):
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        keys = bpy.context.scene.point_cloud_uniforms
+        new_item = keys.add()
+        # we assume the new key is added at the end of the collection, so we get the index by:
+        index = len(bpy.context.scene.point_cloud_uniforms.keys()) -1 
+        new_item.enabled = True
+        new_item.target_object = context.active_object.name if context.active_object else ""
+        new_item.target_property = "location"
+
+        # and now we move the new key to the index just below the original
+        bpy.context.scene.point_cloud_uniforms.move(index, self.copy + 1)
+        return {'RUNNING_MODAL'}
+
+
+class POINTCLOUD_OT_delete_uniform(bpy.types.Operator):
+    """Delete this uniform handle"""
+    bl_idname = "pointcloud.delete_uniform"
+    bl_label = "Delete"
+
+    index: bpy.props.IntProperty(default=0)
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None
+
+    def execute(self, context):
+        bpy.context.scene.point_cloud_uniforms.remove(self.index)
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        bpy.context.scene.point_cloud_uniforms.remove(self.index)
+        return {'RUNNING_MODAL'}
+
+
 
 classes = (
     PointCloudProperties,
     PointCloudRenderSettings,
+    PointCloudUniforms,
     POINTCLOUD_OT_generate_points,
     POINTCLOUD_OT_clear_points,
     POINTCLOUD_OT_render_image,
     POINTCLOUD_OT_save_render,
     POINTCLOUD_OT_save_animation,
+    POINTCLOUD_OT_reload_shader,
+    POINTCLOUD_OT_create_uniform,
+    POINTCLOUD_OT_delete_uniform,
     POINTCLOUD_PT_panel,
     POINTCLOUD_PT_render_panel,
 )
@@ -786,7 +922,7 @@ def register():
     
     bpy.types.Scene.point_cloud_props = PointerProperty(type=PointCloudProperties)
     bpy.types.Scene.point_cloud_render = PointerProperty(type=PointCloudRenderSettings)
-    
+    bpy.types.Scene.point_cloud_uniforms = bpy.props.CollectionProperty(type=PointCloudUniforms, description='collection of uniforms') 
     # Ensure shader text blocks exist
     # ensure_shader_text_blocks()
     
@@ -818,6 +954,9 @@ def unregister():
     
     if hasattr(bpy.types.Scene, "point_cloud_render"):
         del bpy.types.Scene.point_cloud_render
+    
+    if hasattr(bpy.types.Scene, "point_cloud_uniforms"):
+        del bpy.types.Scene.point_cloud_uniforms
 
 
 import os
