@@ -188,14 +188,14 @@ class POINTCLOUD_OT_generate_points(Operator):
                             random.uniform(0, 1), 
                             random.uniform(0, 1), 
                             1.0) 
-                            for _ in range(len(points))]
+                            for _ in range(len(_points))]
                 elif props.use_vertex_colors and mesh.attributes.get(props.vertex_color_name):
                     color_values = [0.0] * (len(_points) * 4)
                     mesh.attributes[props.vertex_color_name].data.foreach_get("color_srgb", color_values)
                     _colors = [(color_values[i], color_values[i+1], color_values[i+2], color_values[i+3]) 
                                 for i in range(0, len(color_values), 4)]
                 else:
-                    _colors = [props.point_color for _ in range(len(points))]
+                    _colors = [props.point_color for i in range(len(_points))]
             else:
                 continue
             
@@ -500,11 +500,19 @@ class POINTCLOUD_PT_panel(Panel):
         layout.prop(props, "point_size")
         layout.prop(props, "use_random_colors")
         layout.prop(props, "use_vertex_colors")
-        layout.prop(props, "shader_type")
+
+        box = layout.box()
+        box.label(text="Current Shader Settings:")
+        row = box.row()
+        row.prop(props, "shader_type", expand=True)
 
         if props.shader_type == 'CUSTOM':
-            layout.prop(props, "vertex_shader_source")
-            layout.prop(props, "fragment_shader_source")
+            box.label(text="Vertex Shader:")
+            row = box.row()
+            row.prop_search(props, "vertex_shader_source", bpy.data, "texts", text="")
+            box.label(text="Fragment Shader:")
+            row = box.row()
+            row.prop_search(props, "fragment_shader_source", bpy.data, "texts", text="")
         
         if not props.use_random_colors and not props.use_vertex_colors:
             layout.prop(props, "point_color")
