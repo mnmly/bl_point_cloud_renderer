@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Point Cloud GPU Renderer",
     "author": "Hiroaki Yamane",
-    "version": (1, 1, 2),
+    "version": (1, 1, 3),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > Point Cloud",
     "description": "Renders point clouds using OpenGL points and exports visualizations and animations",
@@ -709,8 +709,9 @@ def compile_shader(props):
             else:
                 fragment_shader = os.path.join(os.path.dirname(__file__), "resources", "default_fragment.glsl")
 
-        shader_info.vertex_source(resolve_includes(vertex_shader, "third-party/lygia"))
-        shader_info.fragment_source(resolve_includes(fragment_shader, "third-party/lygia"))
+        base_path = os.path.join(os.path.dirname(__file__), "third-party", "lygia")
+        shader_info.vertex_source(resolve_includes(vertex_shader, base_path))
+        shader_info.fragment_source(resolve_includes(fragment_shader, base_path))
 
         shader = gpu.shader.create_from_info(shader_info)
         del vert_out
