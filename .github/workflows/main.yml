@@ -1,0 +1,22 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        
+    - name: Create Release Archive
+      run: |
+        git archive --format=tar.gz --recurse-submodules HEAD > release.tar.gz
+        
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: release.tar.gz
