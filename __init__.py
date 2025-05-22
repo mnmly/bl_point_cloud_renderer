@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Point Cloud GL Renderer",
     "author": "Claude",
-    "version": (1, 0),
+    "version": (1, 1),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Point Cloud",
-    "description": "Renders point clouds using OpenGL points and exports visualizations",
+    "description": "Renders point clouds using OpenGL points and exports visualizations and animations",
     "category": "3D View",
 }
 
@@ -12,6 +12,7 @@ import bpy
 import gpu
 import random
 import numpy as np
+import os
 from bpy.props import (
     FloatProperty,
     FloatVectorProperty,
@@ -67,6 +68,18 @@ class PointCloudProperties(PropertyGroup):
         default=False,
     )
 
+    vertex_shader_source: StringProperty(
+        name="Vertex Shader Source",
+        description="Name of the text block containing vertex shader code",
+        default="vertex.glsl",
+    )
+
+    fragment_shader_source: StringProperty(
+        name="Fragment Shader Source",
+        description="Name of the text block containing fragment shader code",
+        default="fragment.glsl",
+    )
+
     update_on_frame_change: BoolProperty(
         name="Update on Frame Change",
         description="Update point cloud on frame change",
@@ -116,6 +129,31 @@ class PointCloudRenderSettings(PropertyGroup):
         min=0.0,
         max=1.0,
         subtype='COLOR',
+    )
+    frame_start: IntProperty(
+        name="Start Frame",
+        description="First frame of the animation to render",
+        default=1,
+        min=0
+    )
+    frame_end: IntProperty(
+        name="End Frame",
+        description="Last frame of the animation to render",
+        default=250,
+        min=0
+    )
+    frame_step: IntProperty(
+        name="Frame Step",
+        description="Number of frames to skip between renders",
+        default=1,
+        min=1
+    )
+    frame_padding: IntProperty(
+        name="Frame Padding",
+        description="Number of digits to use for frame number in filename",
+        default=4,
+        min=1,
+        max=8
     )
 
 
@@ -259,9 +297,13 @@ class POINTCLOUD_OT_render_image(Operator):
             gpu.state.depth_mask_set(True)
             
             # Draw the points
-            global handler_shader, use_smooth_shader
-            if not use_smooth_shader:
-                handler_shader.uniform_float("color", props.point_color)
+            global handler_shader, use_smooth_shader, shader_type
+
+            if shader_type == 'CUSTOM':
+                # For custom shader, point size is handled in the shader
+                handler_shader.uniform_float("frameCount", context.scene.frame_current)
+            elif not use_smooth_shader:
+                handler_shader.uniform_float("color", first_color)
             handler_batch.draw(handler_shader)
 
             # Reset state
@@ -332,6 +374,116 @@ class POINTCLOUD_OT_save_render(Operator):
         return {'FINISHED'}
 
 
+class POINTCLOUD_OT_save_animation(Operator):
+    bl_idname = "pointcloud.save_animation"
+    bl_label = "Save Animation Frames"
+    bl_description = "Render and save point cloud animation as a sequence of frames"
+    
+    directory: StringProperty(
+        subtype='DIR_PATH',
+        description="Directory to save the rendered frames"
+    )
+    
+    filename_prefix: StringProperty(
+        name="Filename Prefix",
+        description="Prefix for the rendered frame filenames",
+        default="frame_"
+    )
+    
+    file_format: EnumProperty(
+        name="File Format",
+        description="Format to save the rendered frames",
+        items=(
+            ("PNG", "PNG", "Save as PNG"),
+            ("JPEG", "JPEG", "Save as JPEG"),
+            ("TIFF", "TIFF", "Save as TIFF"),
+            ("BMP", "BMP", "Save as BMP"),
+        ),
+        default="PNG"
+    )
+    
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+    
+    def execute(self, context):
+        # Make sure we have a point cloud
+        global handler_batch
+        if handler_batch is None:
+            self.report({'ERROR'}, "No point cloud to render")
+            return {'CANCELLED'}
+        
+        render_props = context.scene.point_cloud_render
+        original_frame = context.scene.frame_current
+        
+        # Create directory if it doesn't exist
+        os.makedirs(self.directory, exist_ok=True)
+        
+        # Set up file extension
+        if self.file_format == "PNG":
+            file_ext = ".png"
+        elif self.file_format == "JPEG":
+            file_ext = ".jpg"
+        elif self.file_format == "TIFF":
+            file_ext = ".tiff"
+        elif self.file_format == "BMP":
+            file_ext = ".bmp"
+        
+        # Render each frame
+        frames_rendered = 0
+        self.report({'INFO'}, f"Starting animation render from frame {render_props.frame_start} to {render_props.frame_end}")
+        
+        try:
+            for frame in range(render_props.frame_start, render_props.frame_end + 1, render_props.frame_step):
+                # Set current frame
+                context.scene.frame_set(frame)
+                
+                # Render the frame
+                bpy.ops.pointcloud.render_image()
+                
+                if not context.scene.get("pointcloud_render_image"):
+                    self.report({'ERROR'}, f"Failed to render frame {frame}")
+                    continue
+                
+                # Get the rendered image
+                image = context.scene["pointcloud_render_image"]
+                
+                # Set image format
+                if self.file_format == "PNG":
+                    image.file_format = 'PNG'
+                elif self.file_format == "JPEG":
+                    image.file_format = 'JPEG'
+                elif self.file_format == "TIFF":
+                    image.file_format = 'TIFF'
+                elif self.file_format == "BMP":
+                    image.file_format = 'BMP'
+                
+                # Generate filename with padded frame number
+                frame_str = str(frame).zfill(render_props.frame_padding)
+                filepath = os.path.join(self.directory, f"{self.filename_prefix}{frame_str}{file_ext}")
+                
+                # Save the image
+                image.filepath_raw = filepath
+                image.save()
+                
+                frames_rendered += 1
+                
+                # Update progress in the console
+                print(f"Rendered frame {frame} ({frames_rendered}/{((render_props.frame_end - render_props.frame_start) // render_props.frame_step) + 1})")
+        
+        except Exception as e:
+            self.report({'ERROR'}, f"Error rendering animation: {str(e)}")
+            # Restore original frame
+            context.scene.frame_set(original_frame)
+            return {'CANCELLED'}
+        
+        # Restore original frame
+        context.scene.frame_set(original_frame)
+        
+        self.report({'INFO'}, f"Animation saved: {frames_rendered} frames rendered to {self.directory}")
+        return {'FINISHED'}
+
+
 class POINTCLOUD_PT_panel(Panel):
     bl_label = "Point Cloud Renderer"
     bl_idname = "POINTCLOUD_PT_panel"
@@ -349,6 +501,10 @@ class POINTCLOUD_PT_panel(Panel):
         layout.prop(props, "use_random_colors")
         layout.prop(props, "use_vertex_colors")
         layout.prop(props, "shader_type")
+
+        if props.shader_type == 'CUSTOM':
+            layout.prop(props, "vertex_shader_source")
+            layout.prop(props, "fragment_shader_source")
         
         if not props.use_random_colors and not props.use_vertex_colors:
             layout.prop(props, "point_color")
@@ -377,18 +533,34 @@ class POINTCLOUD_PT_render_panel(Panel):
     def draw(self, context):
         layout = self.layout
         render_props = context.scene.point_cloud_render
-        layout.prop(render_props, "use_transparent_background")
+        
+        # Background settings
+        box = layout.box()
+        box.label(text="Background Settings")
+        box.prop(render_props, "use_transparent_background")
         if not render_props.use_transparent_background:
-            layout.prop(render_props, "background_color")
+            box.prop(render_props, "background_color")
+        
+        # Single image rendering
         layout.separator()
-        layout.operator("pointcloud.render_image", icon='RENDER_STILL')
+        box = layout.box()
+        box.label(text="Single Image")
+        box.operator("pointcloud.render_image", icon='RENDER_STILL')
         
         if context.scene.get("pointcloud_render_image"):
-            layout.separator()
-            box = layout.box()
-            box.label(text="Rendered Image")
-            # box.template_ID(context.scene, "pointcloud_render_image", new="image.new", open="image.open")
             box.operator("pointcloud.save_render", icon='FILE_TICK')
+        
+        # Animation rendering
+        layout.separator()
+        box = layout.box()
+        box.label(text="Animation")
+        col = box.column(align=True)
+        row = col.row(align=True)
+        row.prop(render_props, "frame_start")
+        row.prop(render_props, "frame_end")
+        col.prop(render_props, "frame_step")
+        col.prop(render_props, "frame_padding")
+        box.operator("pointcloud.save_animation", icon='RENDER_ANIMATION')
 
 
 # Global variables to track handlers
@@ -396,6 +568,7 @@ draw_handler = None
 handler_batch = None
 handler_shader = None
 use_smooth_shader = False
+shader_type = 'UNIFORM_COLOR'
 
 # Handler for file load events
 def on_file_load(dummy):
@@ -420,7 +593,7 @@ def on_frame_change(scene):
         print(f"Could not generate point cloud on frame change: {e}")
 
 def create_point_cloud_handler(context, points, colors, point_size):
-    global draw_handler, handler_batch, handler_shader, use_smooth_shader
+    global draw_handler, handler_batch, handler_shader, use_smooth_shader, shader_type
     
     # Remove existing handler if it exists
     remove_handler(context)
@@ -428,8 +601,10 @@ def create_point_cloud_handler(context, points, colors, point_size):
     # Determine which shader to use
     first_color = len(colors) > 0 and colors[0] or (1.0, 1.0, 1.0, 1.0)
     use_smooth_shader = not all(c == first_color for c in colors)
-    
-    if context.scene.point_cloud_props.shader_type == 'CUSTOM':
+    props = context.scene.point_cloud_props
+    shader_type = props.shader_type
+
+    if props.shader_type == 'CUSTOM':
         vert_out = gpu.types.GPUStageInterfaceInfo("my_interface")
         vert_out.smooth('VEC4', "vertColor")
 
@@ -441,22 +616,28 @@ def create_point_cloud_handler(context, points, colors, point_size):
         shader_info.vertex_out(vert_out)
         shader_info.fragment_out(0, 'VEC4', "FragColor")
 
-        vertex_shader = '''
-            void main()
-            {
-                vertColor = float4(color.rg, color.b * (frameCount / 100.0f), color.a);
-                gl_Position = ModelViewProjectionMatrix * vec4(pos, 1.0f);
-            }
-        '''
-        fragment_shader = '''
-            void main()
-            {
-                FragColor = vertColor;
-            }
-        '''
+        if props.vertex_shader_source and props.vertex_shader_source in bpy.data.texts:
+            vertex_shader = bpy.data.texts[props.vertex_shader_source].as_string()
+        else:
+            # Try to create the text block if it doesn't exist
+            ensure_shader_text_blocks()
+            if props.vertex_shader_source in bpy.data.texts:
+                vertex_shader = bpy.data.texts[props.vertex_shader_source].as_string()
+            else:
+                vertex_shader = os.path.join(os.path.dirname(__file__), "resources", "default_vertex.glsl")
 
-        shader_info.vertex_source(vertex_shader)
-        shader_info.fragment_source(fragment_shader)
+        if props.fragment_shader_source and props.fragment_shader_source in bpy.data.texts:
+            fragment_shader = bpy.data.texts[props.fragment_shader_source].as_string()
+        else:
+            # Try to create the text block if it doesn't exist
+            ensure_shader_text_blocks()
+            if props.fragment_shader_source in bpy.data.texts:
+                fragment_shader = bpy.data.texts[props.fragment_shader_source].as_string()
+            else:
+                fragment_shader = os.path.join(os.path.dirname(__file__), "resources", "default_fragment.glsl")
+
+        shader_info.vertex_source(resolve_includes(vertex_shader, "third-party/lygia"))
+        shader_info.fragment_source(resolve_includes(fragment_shader, "third-party/lygia"))
 
         shader = gpu.shader.create_from_info(shader_info)
         del vert_out
@@ -488,7 +669,7 @@ def create_point_cloud_handler(context, points, colors, point_size):
         gpu.state.depth_test_set('LESS_EQUAL')
         gpu.state.depth_mask_set(True)
         
-        if context.scene.point_cloud_props.shader_type == 'CUSTOM':
+        if shader_type == 'CUSTOM':
             # For custom shader, point size is handled in the shader
             handler_shader.uniform_float("frameCount", context.scene.frame_current)
         elif not use_smooth_shader:
@@ -525,9 +706,35 @@ classes = (
     POINTCLOUD_OT_clear_points,
     POINTCLOUD_OT_render_image,
     POINTCLOUD_OT_save_render,
+    POINTCLOUD_OT_save_animation,
     POINTCLOUD_PT_panel,
     POINTCLOUD_PT_render_panel,
 )
+
+
+def ensure_shader_text_blocks():
+    """Ensure that vertex.glsl and fragment.glsl text blocks exist, creating them from resources if needed."""
+    # Check if vertex shader exists
+    if "vertex.glsl" not in bpy.data.texts:
+        # Create vertex shader from resource file
+        vertex_path = os.path.join(os.path.dirname(__file__), "resources", "default_vertex.glsl")
+        if os.path.exists(vertex_path):
+            with open(vertex_path, 'r') as f:
+                vertex_content = f.read()
+            text_block = bpy.data.texts.new("vertex.glsl")
+            text_block.write(vertex_content)
+            print("Created vertex.glsl text block from resource file")
+    
+    # Check if fragment shader exists
+    if "fragment.glsl" not in bpy.data.texts:
+        # Create fragment shader from resource file
+        fragment_path = os.path.join(os.path.dirname(__file__), "resources", "default_fragment.glsl")
+        if os.path.exists(fragment_path):
+            with open(fragment_path, 'r') as f:
+                fragment_content = f.read()
+            text_block = bpy.data.texts.new("fragment.glsl")
+            text_block.write(fragment_content)
+            print("Created fragment.glsl text block from resource file")
 
 
 def register():
@@ -536,6 +743,9 @@ def register():
     
     bpy.types.Scene.point_cloud_props = PointerProperty(type=PointCloudProperties)
     bpy.types.Scene.point_cloud_render = PointerProperty(type=PointCloudRenderSettings)
+    
+    # Ensure shader text blocks exist
+    # ensure_shader_text_blocks()
     
     # Register the load_post handler
     bpy.app.handlers.load_post.append(on_file_load)
@@ -566,6 +776,96 @@ def unregister():
     if hasattr(bpy.types.Scene, "point_cloud_render"):
         del bpy.types.Scene.point_cloud_render
 
+
+import os
+import re
+from pathlib import Path
+
+def resolve_includes(shader_content, base_path="~/Downloads/lygia", current_file_dir=None, visited=None):
+    """
+    Recursively resolve #include directives in shader code.
+    
+    Args:
+        shader_content (str): The shader code containing #include directives
+        base_path (str): Base path where lygia is located
+        current_file_dir (str): Directory of the current file being processed (for relative paths)
+        visited (set): Set of already included files to prevent circular includes
+    
+    Returns:
+        str: Shader code with all includes resolved
+    """
+    if visited is None:
+        visited = set()
+    
+    # Expand the tilde in the path
+    base_path = os.path.expanduser(base_path)
+    
+    # Pattern to match #include "path/to/file.glsl"
+    include_pattern = r'#include\s*["\']([^"\']+)["\']'
+    
+    def replace_include(match):
+        include_path = match.group(1)
+        original_include_path = include_path
+        
+        # Determine the full file path based on include type
+        if include_path.startswith('lygia/'):
+            # Absolute path from lygia root: "lygia/math/mod289.glsl"
+            include_path = include_path[6:]  # Remove 'lygia/' prefix
+            full_path = os.path.join(base_path, include_path)
+        elif include_path.startswith('../') or include_path.startswith('./'):
+            # Relative path: "../math/mod289.glsl" or "./local.glsl"
+            if current_file_dir:
+                full_path = os.path.join(current_file_dir, include_path)
+            else:
+                # If no current file directory, treat as relative to base_path
+                full_path = os.path.join(base_path, include_path)
+        else:
+            # Direct path without prefix: "math/mod289.glsl"
+            full_path = os.path.join(base_path, include_path)
+        
+        # Normalize the path to resolve .. and . components
+        full_path = os.path.normpath(full_path)
+        
+        # Convert to absolute path to handle circular includes properly
+        abs_path = os.path.abspath(full_path)
+        
+        # Check for circular includes
+        if abs_path in visited:
+            return f"// Circular include detected: {original_include_path}"
+        
+        try:
+            # Check if file exists
+            if not os.path.exists(full_path):
+                return f"// File not found: {original_include_path} (resolved to: {full_path})"
+            
+            # Read the included file
+            with open(full_path, 'r', encoding='utf-8') as f:
+                included_content = f.read()
+            
+            # Add to visited set
+            visited.add(abs_path)
+            
+            # Get the directory of the included file for nested relative includes
+            included_file_dir = os.path.dirname(full_path)
+            
+            # Recursively resolve includes in the included file
+            resolved_content = resolve_includes(
+                included_content, 
+                base_path, 
+                included_file_dir,  # Pass the directory of the included file
+                visited.copy()
+            )
+            
+            # Add comments to show what was included
+            return f"// BEGIN INCLUDE: {original_include_path}\n{resolved_content}\n// END INCLUDE: {original_include_path}"
+            
+        except Exception as e:
+            return f"// Error including {original_include_path}: {str(e)}"
+    
+    # Replace all includes
+    resolved_content = re.sub(include_pattern, replace_include, shader_content)
+    
+    return resolved_content
 
 if __name__ == "__main__":
     register()

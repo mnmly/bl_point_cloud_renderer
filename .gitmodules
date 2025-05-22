@@ -1,0 +1,3 @@
+[submodule "third-party/lygia"]
+	path = third-party/lygia
+	url = git@github.com:patriciogonzalezvivo/lygia.git
