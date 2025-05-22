@@ -16,15 +16,37 @@ jobs:
         submodules: recursive
         fetch-depth: 0  # Full history for proper tagging
         
-    - name: Create release archive
+    - name: Create release archive with submodules
       run: |
-        # Create archive with submodules
-        git archive --format=tar.gz --recurse-submodules HEAD > release-${GITHUB_REF_NAME}.tar.gz
-        git archive --format=zip --recurse-submodules HEAD > release-${GITHUB_REF_NAME}.zip
+        # Check if git archive supports --recurse-submodules
+        if git archive --help | grep -q "recurse-submodules"; then
+          echo "Using git archive with --recurse-submodules"
+          git archive --format=tar.gz --recurse-submodules HEAD > release-${GITHUB_REF_NAME}.tar.gz
+          git archive --format=zip --recurse-submodules HEAD > release-${GITHUB_REF_NAME}.zip
+        else
+          echo "Using manual submodule integration"
+          # Create a clean working copy with submodules
+          git submodule update --init --recursive
+          
+          # Create temporary directory
+          mkdir release-temp
+          
+          # Copy everything except .git directories
+          rsync -av --exclude='.git*' --exclude='.github' . release-temp/
+          
+          # Create archives
+          cd release-temp
+          tar -czf ../release-${GITHUB_REF_NAME}.tar.gz .
+          zip -r ../release-${GITHUB_REF_NAME}.zip .
+          cd ..
+          
+          # Cleanup
+          rm -rf release-temp
+        fi
         
-        # Optional: Create checksums
-        sha256sum release-${GITHUB_REF_NAME}.tar.gz > release-${GITHUB_REF_NAME}.tar.gz.sha256
-        sha256sum release-${GITHUB_REF_NAME}.zip > release-${GITHUB_REF_NAME}.zip.sha256
+        # Create checksums
+        sha256sum release-${GITHUB_REF_NAME}.tar.gz > release-${GITHUB_REF_NAME}.tar.gz.sha256 || true
+        sha256sum release-${GITHUB_REF_NAME}.zip > release-${GITHUB_REF_NAME}.zip.sha256 || true
         
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
