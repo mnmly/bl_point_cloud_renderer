@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Point Cloud GPU Renderer",
     "author": "Hiroaki Yamane",
-    "version": (1, 1, 0),
+    "version": (1, 1, 1),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > Point Cloud",
     "description": "Renders point clouds using OpenGL points and exports visualizations and animations",
