@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Point Cloud GPU Renderer",
     "author": "Hiroaki Yamane",
-    "version": (1, 1, 1),
+    "version": (1, 1, 3),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > Point Cloud",
     "description": "Renders point clouds using OpenGL points and exports visualizations and animations",
@@ -512,76 +512,82 @@ class POINTCLOUD_PT_panel(Panel):
     bl_category = 'Point Cloud'
     
     def draw(self, context):
+
+        global object_data_cache
+        
         layout = self.layout
         props = context.scene.point_cloud_props
-        
+
         # Point rendering settings
-        layout.separator()
-        layout.prop(props, "point_size")
-        layout.prop(props, "use_random_colors")
-        layout.prop(props, "use_vertex_colors")
+        if object_data_cache is not None:
+            layout.separator()
+            layout.prop(props, "point_size")
+            layout.prop(props, "use_random_colors")
+            layout.prop(props, "use_vertex_colors")
 
-        box = layout.box()
-        box.label(text="Current Shader Settings:")
-        row = box.row()
-        row.prop(props, "shader_type", expand=True)
-
-        if props.shader_type == 'CUSTOM' or props.shader_type == 'BUILTIN':
-            box.label(text="Vertex Shader:")
-            row = box.row()
-            row.prop_search(props, "vertex_shader_source", bpy.data, "texts", text="")
-            box.label(text="Fragment Shader:")
-            row = box.row()
-            row.prop_search(props, "fragment_shader_source", bpy.data, "texts", text="")
-            box.label(text="Reload Shader:")
-            row = box.row()
-
-            index = 0
             box = layout.box()
-            box.label(text="Custom Uniforms")
-            col = box.column()
-            for item in bpy.context.scene.point_cloud_uniforms:
-                col_box = col.column()
-                box = col_box.box()
-                #box.enabled = not envars.isServerRunning
-                colsub = box.column()
-                row = colsub.row(align=True)
+            box.label(text="Current Shader Settings:")
+            row = box.row()
+            row.prop(props, "shader_type", expand=True)
 
-                row.prop(item, "ui_expanded", text = "", 
-                            icon='DISCLOSURE_TRI_DOWN' if item.ui_expanded else 'DISCLOSURE_TRI_RIGHT', 
-                            emboss = False)
+            if props.shader_type == 'CUSTOM':
+                ensure_shader_text_blocks()
+                
+                box.label(text="Vertex Shader:")
+                row = box.row()
+                row.prop_search(props, "vertex_shader_source", bpy.data, "texts", text="")
+                box.label(text="Fragment Shader:")
+                row = box.row()
+                row.prop_search(props, "fragment_shader_source", bpy.data, "texts", text="")
+                box.label(text="Reload Shader:")
+                row = box.row()
 
-                sub1 = row.row()
-                sub1.prop(item, "enabled", text = "", 
-                            icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT', 
-                            emboss = False)
-                sub2 = row.row()
-                sub2.active = item.enabled
-                sub2.label(text=f"{item.name}:{item.property_type} = {item.target_object}.{item.target_property}")
-                subsub = sub2.row(align=True)
-                subsub.operator("pointcloud.delete_uniform", icon='PANEL_CLOSE', text = "").index = index
+                index = 0
+                box = layout.box()
+                box.label(text="Custom Uniforms")
+                col = box.column()
+                for item in bpy.context.scene.point_cloud_uniforms:
+                    col_box = col.column()
+                    box = col_box.box()
+                    #box.enabled = not envars.isServerRunning
+                    colsub = box.column()
+                    row = colsub.row(align=True)
 
-                if item.ui_expanded:
-                    dataColumn = colsub.column(align=True)
-                    dataSplit = dataColumn.split(factor = 0.2)
-                    colLabel = dataSplit.column(align = True)
-                    colData = dataSplit.column(align = True)
-                    colLabel.label(text='Name')
-                    colData.prop(item, "name", text="")
-                    colLabel.label(text='Object')
-                    colData.prop_search(item, "target_object", bpy.data, "objects", text="")
-                    colLabel.label(text='Property')
-                    colData.prop(item, "target_property", text="")
+                    row.prop(item, "ui_expanded", text = "", 
+                                icon='DISCLOSURE_TRI_DOWN' if item.ui_expanded else 'DISCLOSURE_TRI_RIGHT', 
+                                emboss = False)
 
-                index = index + 1
-            layout.operator("pointcloud.create_uniform", icon='PRESET_NEW', text='Create new uniform').copy = -1
-        row = layout.row()
-        row.operator("pointcloud.reload_shader", icon='FILE_REFRESH')
-        
-        if not props.use_random_colors and not props.use_vertex_colors:
-            layout.prop(props, "point_color")
-        if props.use_vertex_colors:
-            layout.prop(props, "vertex_color_name")
+                    sub1 = row.row()
+                    sub1.prop(item, "enabled", text = "", 
+                                icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT', 
+                                emboss = False)
+                    sub2 = row.row()
+                    sub2.active = item.enabled
+                    sub2.label(text=f"{item.name}:{item.property_type} = {item.target_object}.{item.target_property}")
+                    subsub = sub2.row(align=True)
+                    subsub.operator("pointcloud.delete_uniform", icon='PANEL_CLOSE', text = "").index = index
+
+                    if item.ui_expanded:
+                        dataColumn = colsub.column(align=True)
+                        dataSplit = dataColumn.split(factor = 0.2)
+                        colLabel = dataSplit.column(align = True)
+                        colData = dataSplit.column(align = True)
+                        colLabel.label(text='Name')
+                        colData.prop(item, "name", text="")
+                        colLabel.label(text='Object')
+                        colData.prop_search(item, "target_object", bpy.data, "objects", text="")
+                        colLabel.label(text='Property')
+                        colData.prop(item, "target_property", text="")
+
+                    index = index + 1
+                layout.operator("pointcloud.create_uniform", icon='PRESET_NEW', text='Create new uniform').copy = -1
+            row = layout.row()
+            row.operator("pointcloud.reload_shader", icon='FILE_REFRESH')
+            
+            if not props.use_random_colors and not props.use_vertex_colors:
+                layout.prop(props, "point_color")
+            if props.use_vertex_colors:
+                layout.prop(props, "vertex_color_name")
 
         
         layout.separator()
