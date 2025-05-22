@@ -172,17 +172,18 @@ class POINTCLOUD_OT_generate_points(Operator):
         # Generate points based on selected mode
         depsgraph = context.evaluated_depsgraph_get()
         visible_objects = [obj for obj in bpy.context.scene.objects if obj.visible_get()]
-        points = []
-        colors = []
+        object_data_list = []
 
         for obj in visible_objects:
             if obj.type == 'MESH':
                 eval_obj = obj.evaluated_get(depsgraph)
-                mesh = eval_obj.data
-                
                 # Get vertices in world space
                 world_matrix = obj.matrix_world
-                _points = [world_matrix @ v.co for v in mesh.vertices]
+                mesh = eval_obj.data
+                
+                num_vertices = len(mesh.vertices)
+                _points = np.empty((num_vertices, 3), 'f')
+                mesh.vertices.foreach_get( "co", np.reshape(_points, num_vertices * 3))
                 if props.use_random_colors:
                     _colors = [(random.uniform(0, 1), 
                             random.uniform(0, 1), 
@@ -190,20 +191,21 @@ class POINTCLOUD_OT_generate_points(Operator):
                             1.0) 
                             for _ in range(len(_points))]
                 elif props.use_vertex_colors and mesh.attributes.get(props.vertex_color_name):
-                    color_values = [0.0] * (len(_points) * 4)
-                    mesh.attributes[props.vertex_color_name].data.foreach_get("color_srgb", color_values)
-                    _colors = [(color_values[i], color_values[i+1], color_values[i+2], color_values[i+3]) 
-                                for i in range(0, len(color_values), 4)]
+                    attr = mesh.attributes[props.vertex_color_name]
+                    _colors = np.empty((num_vertices, 4), 'f')
+                    attr.data.foreach_get("color_srgb", np.reshape(_colors, num_vertices * 4))
                 else:
                     _colors = [props.point_color for i in range(len(_points))]
+                object_data_list.append({
+                    'points': _points,
+                    'colors': _colors,
+                    'matrix_world': world_matrix
+                })
             else:
                 continue
-            
-            points.extend(_points)
-            colors.extend(_colors)
 
         # Create the point cloud handler
-        create_point_cloud_handler(context, points, colors, props.point_size)
+        create_point_cloud_handler(context, object_data_list, props.point_size)
         
         return {'FINISHED'}
 
@@ -600,17 +602,25 @@ def on_frame_change(scene):
     except Exception as e:
         print(f"Could not generate point cloud on frame change: {e}")
 
-def create_point_cloud_handler(context, points, colors, point_size):
+def create_point_cloud_handler(context, object_data_list, point_size):
     global draw_handler, handler_batch, handler_shader, use_smooth_shader, shader_type
     
     # Remove existing handler if it exists
     remove_handler(context)
+
+    # Check if we have any objects to render
+    if not object_data_list:
+        return
     
     # Determine which shader to use
-    first_color = len(colors) > 0 and colors[0] or (1.0, 1.0, 1.0, 1.0)
-    use_smooth_shader = not all(c == first_color for c in colors)
+    first_object = object_data_list[0]
+    first_color = first_object['colors'][0] if len(first_object['colors']) > 0 else (1.0, 1.0, 1.0, 1.0)
     props = context.scene.point_cloud_props
+    use_smooth_shader = props.use_vertex_colors or props.use_random_colors
     shader_type = props.shader_type
+
+    # Store batches and matrices for each object
+    handler_batches = []
 
     if props.shader_type == 'CUSTOM':
         vert_out = gpu.types.GPUStageInterfaceInfo("my_interface")
@@ -618,6 +628,7 @@ def create_point_cloud_handler(context, points, colors, point_size):
 
         shader_info = gpu.types.GPUShaderCreateInfo()
         shader_info.push_constant('MAT4', "ModelViewProjectionMatrix")
+        shader_info.push_constant('MAT4', "ModelMatrix")  # Add model matrix uniform
         shader_info.push_constant('FLOAT', "frameCount")
         shader_info.vertex_in(0, 'VEC3', "pos")
         shader_info.vertex_in(1, 'VEC4', "color")
@@ -650,22 +661,40 @@ def create_point_cloud_handler(context, points, colors, point_size):
         shader = gpu.shader.create_from_info(shader_info)
         del vert_out
         del shader_info
-        handler_batch = batch_for_shader(shader, 'POINTS', {
-            "pos": points,
-            "color": colors
-        })
+
+        for obj_data in object_data_list:
+            batch = batch_for_shader(shader, 'POINTS', {
+                "pos": obj_data['points'],
+                "color": obj_data['colors']
+            })
+            handler_batches.append({
+                'batch': batch,
+                'matrix_world': obj_data['matrix_world']
+            })
         
     elif use_smooth_shader:
         shader = gpu.shader.from_builtin('SMOOTH_COLOR')
-        handler_batch = batch_for_shader(shader, 'POINTS', {
-            "pos": points,
-            "color": colors
-        })
+        # Create a batch for each object
+        for obj_data in object_data_list:
+            batch = batch_for_shader(shader, 'POINTS', {
+                "pos": obj_data['points'],
+                "color": obj_data['colors']
+            })
+            handler_batches.append({
+                'batch': batch,
+                'matrix_world': obj_data['matrix_world']
+            })
     else:
         shader = gpu.shader.from_builtin('UNIFORM_COLOR')
-        handler_batch = batch_for_shader(shader, 'POINTS', {
-            "pos": points
-        })
+        for obj_data in object_data_list:
+            batch = batch_for_shader(shader, 'POINTS', {
+                "pos": obj_data['points']
+            })
+            handler_batches.append({
+                'batch': batch,
+                'matrix_world': obj_data['matrix_world'],
+                'color': obj_data['colors'][0] if obj_data['colors'] else first_color
+            })
     
     handler_shader = shader
     
@@ -677,13 +706,19 @@ def create_point_cloud_handler(context, points, colors, point_size):
         gpu.state.depth_test_set('LESS_EQUAL')
         gpu.state.depth_mask_set(True)
         
-        if shader_type == 'CUSTOM':
-            # For custom shader, point size is handled in the shader
-            handler_shader.uniform_float("frameCount", context.scene.frame_current)
-        elif not use_smooth_shader:
-            handler_shader.uniform_float("color", first_color)
+        for batch_data in handler_batches:
 
-        handler_batch.draw(handler_shader)
+            if shader_type == 'CUSTOM':
+                # For custom shader, point size is handled in the shader
+                handler_shader.uniform_float("ModelViewProjectionMatrix", 
+                                                context.region_data.perspective_matrix @ batch_data['matrix_world'])
+                handler_shader.uniform_float("frameCount", context.scene.frame_current)
+            elif not use_smooth_shader:
+                handler_shader.uniform_float("ModelViewProjectionMatrix", 
+                                                context.region_data.perspective_matrix @ batch_data['matrix_world'])
+                handler_shader.uniform_float("color", first_color)
+
+            batch_data['batch'].draw(handler_shader)
         
         # Reset state
         gpu.state.point_size_set(1.0)
