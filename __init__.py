@@ -297,11 +297,11 @@ class POINTCLOUD_OT_render_image(Operator):
             
             # Set point size
             props = context.scene.point_cloud_props
-            gpu.state.point_size_set(props.point_size)
-            
-            # Enable depth testing
+            gpu.state.point_size_set(point_size)
+            gpu.state.blend_set('ALPHA')
             gpu.state.depth_test_set('LESS_EQUAL')
-            gpu.state.depth_mask_set(True)
+            gpu.state.depth_mask_set(False)
+            gpu.state.face_culling_set('NONE')
             
             # Draw the points
             global use_smooth_shader, shader_type
@@ -328,6 +328,9 @@ class POINTCLOUD_OT_render_image(Operator):
 
             # Reset state
             gpu.state.point_size_set(1.0)
+            gpu.state.blend_set('NONE')
+            gpu.state.depth_mask_set(True)
+            gpu.state.face_culling_set('BACK')
             
             # Read pixels
             buffer = fb.read_color(
@@ -785,11 +788,11 @@ def create_point_cloud_handler(context, object_data_list, point_size, recompile_
     def draw(context, point_size, first_color):
         # Set point size
         gpu.state.point_size_set(point_size)
-        
-        # Enable depth testing
+        gpu.state.blend_set('ALPHA')
         gpu.state.depth_test_set('LESS_EQUAL')
-        gpu.state.depth_mask_set(True)
-        
+        gpu.state.depth_mask_set(False)
+        gpu.state.face_culling_set('NONE')
+
         for batch_data in handler_batches:
 
             if shader_type == 'CUSTOM':
@@ -810,6 +813,9 @@ def create_point_cloud_handler(context, object_data_list, point_size, recompile_
         
         # Reset state
         gpu.state.point_size_set(1.0)
+        gpu.state.blend_set('NONE')  # Reset blending
+        gpu.state.depth_mask_set(True)
+        gpu.state.face_culling_set('BACK')
     
     # Add the draw handler
     draw_handler = bpy.types.SpaceView3D.draw_handler_add(draw, (context, point_size, first_color), 'WINDOW', 'POST_VIEW')
