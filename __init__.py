@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Point Cloud GPU Renderer",
     "author": "Hiroaki Yamane",
-    "version": (1, 1, 3),
+    "version": (1, 1, 4),
     "blender": (4, 4, 0),
     "location": "View3D > Sidebar > Point Cloud",
     "description": "Renders point clouds using OpenGL points and exports visualizations and animations",
@@ -313,7 +313,7 @@ class POINTCLOUD_OT_render_image(Operator):
                     handler_shader.uniform_float("ModelViewProjectionMatrix", 
                                                     context.region_data.perspective_matrix @ batch_data['matrix_world'])
                     handler_shader.uniform_float("frameCount", context.scene.frame_current)
-                    for item in uniforms:
+                    for item in batch_data['uniforms']:
                         if item.enabled:
                             if item.property_type == "VEC3":
                                 handler_shader.uniform_float(item.name, item.evaluate_value())
